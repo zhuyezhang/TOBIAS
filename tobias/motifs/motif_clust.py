@@ -14,13 +14,14 @@ import argparse
 import numpy as np
 import seaborn as sns
 import pandas as pd
-import datetime
 import os
 import yaml
 import re
+import sys
 import math
 import itertools
 import warnings
+import copy
 from Bio import motifs
 from matplotlib import pyplot as plt
 from gimmemotifs.motif import Motif,read_motifs
@@ -54,22 +55,22 @@ def add_motifclust_arguments(parser):
     required.add_argument("-m", "--motifs", required=True, help="One or more motif files to compare and cluster", nargs="*", metavar="")
     
     optional = parser.add_argument_group('Optional arguments')
-    optional.add_argument("-t", "--threshold", help="Clustering threshold (Default = 0.5)", type=float, default=0.5)  
-    optional.add_argument('--dist_method', help="Method for calculating similarity between motifs (default: pcc)", choices=["pcc", "seqcor", "ed", "distance", "wic", "chisq", "akl", "sdd"], default="pcc")
-    optional.add_argument('--clust_method', help="Method for clustering (See: https://docs.scipy.org/doc/scipy/reference/generated/scipy.cluster.hierarchy.linkage.html)", default="average", choices=["single","complete","average","weighted","centroid","median","ward"])
-    optional.add_argument("-a", "--cons_format", choices= ['transfac', 'meme', 'pwm'], help="Format of consensus motif file [‘transfac’, ‘meme’, ‘pwm’] (Default: pwm)", default="pwm")
-    optional.add_argument("-p", "--prefix", help="Output prefix (Default: ‘motif_comparison’)", default="motif_comparison")
-    optional.add_argument("-o", "--outdir", help="Output directory (Default: ‘./ClusterMotifs‘)", default="ClusterMotifs")
+    optional.add_argument("-t", "--threshold", metavar="", help="Clustering threshold (Default = 0.5)", type=float, default=0.5)  
+    optional.add_argument('--dist_method', metavar="", help="Method for calculating similarity between motifs (default: pcc)", choices=["pcc", "seqcor", "ed", "distance", "wic", "chisq", "akl", "sdd"], default="pcc")
+    optional.add_argument('--clust_method', metavar="", help="Method for clustering (See: https://docs.scipy.org/doc/scipy/reference/generated/scipy.cluster.hierarchy.linkage.html)", default="average", choices=["single","complete","average","weighted","centroid","median","ward"])
+    optional.add_argument("-a", "--cons_format", metavar="", choices= ['transfac', 'meme', 'pwm', 'pfm', 'jaspar'], help="Format of consensus motif file [‘transfac’, ‘meme’, ‘pwm’, 'pfm', 'jaspar'] (Default: pfm)", default="pfm")
+    optional.add_argument("-p", "--prefix", metavar="", help="Output prefix (Default: ‘motif_comparison’)", default="motif_comparison")
+    optional.add_argument("-o", "--outdir", metavar="", help="Output directory (Default: ‘./ClusterMotifs‘)", default="ClusterMotifs")
     optional = add_logger_args(optional)
 
     visualisation = parser.add_argument_group('Visualisation arguments')
-    visualisation.add_argument("-e", "--type", dest="type", choices= ['png', 'pdf', 'jpg'], help="Plot file type [png, pdf, jpg] (Default: pdf)", default="pdf")
-    visualisation.add_argument("-x", "--width", dest="width", help="Width of Heatmap (Default: autoscaling)", type=int)
-    visualisation.add_argument("-y", "--height", dest="height", help="Height of Heatmap (Default: autoscaling)", type=int)
-    visualisation.add_argument("-d", "--dpi", dest="dpi", help="Dpi for plots (Default: 100)", type=int, default=100)
+    visualisation.add_argument("-e", "--type", metavar="", dest="type", choices= ['png', 'pdf', 'jpg'], help="Plot file type [png, pdf, jpg] (Default: pdf)", default="pdf")
+    visualisation.add_argument("-x", "--width", metavar="", dest="width", help="Width of Heatmap (Default: autoscaling)", type=int)
+    visualisation.add_argument("-y", "--height", metavar="", dest="height", help="Height of Heatmap (Default: autoscaling)", type=int)
+    visualisation.add_argument("-d", "--dpi", metavar="", dest="dpi", help="Dpi for plots (Default: 100)", type=int, default=100)
     #visualisation.add_argument("-ncc", "--no_col_clust", dest="ncc", help="No column clustering", action="store_true")
     #visualisation.add_argument("-nrc", "--no_row_clust", dest="nrc", help="No row clustering", action="store_true")
-    visualisation.add_argument("-c", "--color_palette", dest="color", help="Color palette (All possible paletts: https://python-graph-gallery.com/197-available-color-palettes-with-matplotlib/. Add '_r' to reverse palette.)", default="YlOrRd_r")
+    visualisation.add_argument("-c", "--color_palette", metavar="", dest="color", help="Color palette (All possible paletts: https://python-graph-gallery.com/197-available-color-palettes-with-matplotlib/. Add '_r' to reverse palette.)", default="YlOrRd_r")
 
     return parser
 
@@ -115,6 +116,9 @@ def get_motifs(path, format):
         if format == "meme":
             format = "minimal"
 
+        if format == "pfm":
+            format = "jaspar"
+        
         # Otherwise Bio.python is used
         with open(path) as f:
             bio_motif_list = motifs.parse(f, format)
@@ -190,7 +194,7 @@ def generate_similarity_matrix(score_dict):
 
     m1_labels = [s.replace('\t', ' ') for s in m1_keys] # replacing tabs with whitespace
     m2_labels = [s.replace('\t', ' ') for s in m2_keys]
-    
+
     #Make sure similarity dict is symmetrical:
     similarity_dict = {m:{} for m in m1_labels}  #initialize dict
     for i, m1 in enumerate(m1_keys):
@@ -252,7 +256,11 @@ def get_dissimilar_motifs(matrix, threshold):
     columns = matrix.shape[1]
     dissimilar_motifs = list()
     for col in range(columns-1):
-        col_vec = matrix.iloc[:,col] > threshold
+
+        col_series = matrix.iloc[:,col]
+        col_series.drop(labels=matrix.iloc[:,col].name, inplace=True)
+        col_vec = col_series > threshold
+
         if(col_vec.eq(True).all()):
             dissimilar_motifs.append(matrix.columns[col])
     return dissimilar_motifs
@@ -403,7 +411,7 @@ def write_yaml(clusters, yml_out):
 
 
 #--------------------------------------------------------------------------------------------------------#
-def plot_dendrogram(label, linkage, font_size, out, title, threshold, y, dpi, t):
+def plot_dendrogram(label, linkage, font_size, out, title, threshold, dpi):
     """Plot dendrogram with highlighted threshold 
 
     Parameter:
@@ -420,107 +428,33 @@ def plot_dendrogram(label, linkage, font_size, out, title, threshold, y, dpi, t)
         Plot title
     threshold : float
         dendrogram cluster threshold
-    y : int
-        yaxis size of plot
     dpi : int
         dpi of plot
-    t : string
-        type of plot file
     """
 
-    plt.figure(figsize=(20, y))
+    x = 10.0
+    y = x * len(label)/(x*3)    #ensure good aspect ratio
+                                #set cap on y axis (prevent errors from too large figure)
+
+    plt.figure(figsize=(x, y))
     plt.title(title, fontsize=20)
     plt.axvline(x=threshold, color="red")
     dendrogram(linkage, color_threshold=threshold, labels=label, leaf_font_size=font_size, orientation="right")
     try:
-        plt.savefig(out + "." + t, dpi=dpi)
+        plt.savefig(out, dpi=dpi)
+
     except ValueError as e:
-        print("Skipped ploting of Heatmap.")
+        print("Skipped plotting of dendrogram.")
         print("Error: " + str(e))
 
 
 #--------------------------------------------------------------------------------------------------------#
-def generate_consensus_motifs(motif_list, cluster, similarity_dict):
-    """Generates a consensus motif for each cluster
-
-    Parameter:
-    ----------
-    motif_list : list
-        list of all motif instances
-    cluster : dict
-        A dictionary containing named clusters.
-    similarity_dict : dict
-        Output from gimmemotif.get_all_scores
-
-    Returns:
-    --------
-        dict of consensus motifs as gimmemotif motif instance
-    """
-
-    consensus_motifs = dict()
-    for cluster, value in cluster.items():
-        cluster_motifs = list()
-        # Get motif instances
-        for m in motif_list:
-            if m.id in value:
-                cluster_motifs.append(m)
-        consensus_motifs[cluster] = generate_consensus_motif(cluster_motifs, similarity_dict)
-    return consensus_motifs
-
-
-#--------------------------------------------------------------------------------------------------------#
-def generate_consensus_motif(motifs, similarity_dict):
-    """Recursive algorithm to generate consensus motif from multiple motifs
-
-    Parameter:
-    ----------
-    motifs : list
-        list of gimmemotif motif instances
-    similarity_dict : dict
-        Output from gimmemotifs.get_all_scores
-
-    Returns:
-    --------
-    gimmemotifs motif instance
-        consensus motif of all motifs in motifs list
-    """
-
-    mc = MotifComparer()
-
-    if len(motifs) == 1:
-        return motifs[0]
-
-    # score cannot be lower that 0 so max score is initialized with 0
-    max_score = 0
-    for motif_1, motif_2  in itertools.combinations(motifs, 2):
-        score = similarity_dict[motif_1.id][motif_2.id]
-        if score[0] >= max_score:
-            max_score = score[0]
-            merge_1 = motif_1
-            merge_2 = motif_2
-
-    # generate average motif
-    average_motif = merge_1.average_motifs(merge_2, pos=score[1], orientation=score[2])
-    average_motif.id = merge_1.id + "_" + merge_2.id
-
-    # alter list 
-    motifs.append(average_motif)
-    motifs.remove(merge_1)
-    motifs.remove(merge_2)
-
-    sim_dict = mc.get_all_scores(motifs, motifs, match = "total", metric = "pcc", combine = "mean" )
-
-    cons_motif = generate_consensus_motif(motifs, sim_dict)
-    return cons_motif
-
-
-#--------------------------------------------------------------------------------------------------------#
-def save_motif_image(consensus_motif, prefix, ext, out):
+def save_motif_image(motif, prefix, ext, out):
     """Save motif to image file
 
     Paramater:
     ----------
-    consensus_motif : gimmemotif motif instance
+    motif : gimmemotif motif instance
         The motif to be plotted
     prefix : string
         Prefix for image file
@@ -530,19 +464,22 @@ def save_motif_image(consensus_motif, prefix, ext, out):
         Output path
     """
 
-    if ext == "jpg":
+    """ # currently only png is supported, bug with gimmemotifs?
+    if ext == "jpg" :
         ext = "png"
         warnings.warn("The 'jpg' format is not supported for motif image. Type is set tp 'png'")
-    consensus_motif.to_img(os.path.join(out, prefix + "_consensus." + ext))
+    """
+    
+    motif.to_img(os.path.join(out, prefix))
 
 
 #--------------------------------------------------------------------------------------------------------#
-def convert_motif(consensus_motif, f):
+def convert_motif(motif, f):
     """ Convert motif to given format
 
     Parameter:
     ----------
-    consensus_motif : gimmemotif motif instance
+    motif : gimmemotif motif instance
         The motif to be written to file
     out : string
         Output string without file ending
@@ -556,18 +493,61 @@ def convert_motif(consensus_motif, f):
     """
 
     if f == "meme":
-        motif = consensus_motif.to_meme()
+        motif = motif.to_meme()
     elif f == "pwm":
-        motif = consensus_motif.to_pwm()
+        motif = motif.to_pwm()
     elif f == "transfac":
-        motif = consensus_motif.to_transfac()
+        motif = motif.to_transfac()
+    elif f == "jaspar" or f == "pfm":
+        motif = convert_to_jaspar(motif, f)
     else:
         raise ValueError("Format " + f + " is not supported")
     return motif
 
 
 #--------------------------------------------------------------------------------------------------------#
-def consensus_motif_out_wrapper(consensus_motifs, out_prefix, img_out, cons_format, name, typ, file_name = None):
+def convert_to_jaspar(motif, f):
+    """Converts gimmemotif instance to jaspar format as string
+
+    Parameters:
+    motif : gimmemotif instance
+    f : string
+        format: jaspar or pfm
+
+    Returns:
+    jaspar_motif : string
+        string containing motif with jaspar or pfm format
+    """
+
+    motif_false_pfm = motif.to_pfm()
+
+    if f == "jaspar":
+        a_string, c_string, g_string, t_string = "A [ ", "C [ ", "G [ ", "T [ "
+    else:
+        a_string, c_string, g_string, t_string = "", "", "", ""
+
+    single_scores = motif_false_pfm.split()
+    header = single_scores[0]
+    del single_scores[0]
+    for i in range(0, len(single_scores), 4):
+        a_string += single_scores[i] + " "
+        c_string += single_scores[i+1] + " "
+        g_string += single_scores[i+2] + " "
+        t_string += single_scores[i+3] + " "
+
+    if f == "jaspar":
+        a_string += "]"
+        c_string += "]"
+        g_string += "]"
+        t_string += "]"
+
+    jaspar_motif = "\n".join([header, a_string, c_string, g_string, t_string])
+
+    return jaspar_motif
+
+
+#--------------------------------------------------------------------------------------------------------#
+def consensus_motif_out_wrapper(consensus_motifs, out_prefix, img_out, cons_format, typ):
     """ Wrapper for consensus motif output
 
     Parameter:
@@ -582,26 +562,18 @@ def consensus_motif_out_wrapper(consensus_motifs, out_prefix, img_out, cons_form
         Format for motif file
     name : string
         Prefix for motif images
-    file_name : string
-        File name of clustered motifs
     typ : string
         File format of image
     """
 
-    if file_name is not None:
-        img_prefix = name + "_" + file_name
-        cons_out_path = out_prefix + "_" + file_name + "_consensus_motifs." + cons_format
-    else:
-        img_prefix = name 
-        cons_out_path = out_prefix + "_consensus_motifs." + cons_format
+    cons_out_path = out_prefix + "_consensus_motifs." + cons_format
 
     cons_out = open(cons_out_path, 'w+')
 
     for cluster, consensus_motif in consensus_motifs.items():
-        consensus_motif.id = cluster + "_" + consensus_motif.id
 
         # Save motif as image
-        save_motif_image(consensus_motif, img_prefix + "_" + cluster, typ, img_out)
+        save_motif_image(consensus_motif, cluster + "_consensus", typ, img_out)
 
         # Save motifs to file
         motif_string = convert_motif(consensus_motif, cons_format)
@@ -609,7 +581,7 @@ def consensus_motif_out_wrapper(consensus_motifs, out_prefix, img_out, cons_form
 
 
 #--------------------------------------------------------------------------------------------------------#
-def plot_heatmap(similarity_matrix, out, x, y, col_linkage, row_linkage, dpi, x_name, y_name, color, col_clust, row_clust, zscore):
+def plot_heatmap(similarity_matrix, out, col_linkage, row_linkage, dpi, x_name, y_name, color, col_clust, row_clust, zscore):
     """Plots clustered similarity matrix as a heatmap
 
     Parameter:
@@ -618,10 +590,6 @@ def plot_heatmap(similarity_matrix, out, x, y, col_linkage, row_linkage, dpi, x_
         a DataTable contaning the similarity score
     out : string
         Prefix to output file
-    x : int
-        width for heatmap plot
-    y : int
-        height for heatmap plot
     col_linkage : ndarray
         The hierarchical clustering of cols encoded as a linkage matrix.
     row_linkage : ndarray
@@ -649,6 +617,12 @@ def plot_heatmap(similarity_matrix, out, x, y, col_linkage, row_linkage, dpi, x_
         zs = None
         vmin, vmax = 0, 1
 
+    #Establish figsize
+    x_len = len(similarity_matrix.columns)
+    y_len = len(similarity_matrix.index.values)
+    x = 30  
+    y = x * y_len/x_len    #Ensure correct aspect ratio
+    
     try:
         plot = sns.clustermap(similarity_matrix,
             row_linkage=row_linkage,
@@ -657,16 +631,152 @@ def plot_heatmap(similarity_matrix, out, x, y, col_linkage, row_linkage, dpi, x_
             row_cluster= not row_clust,
             z_score=zs,
             cmap=color,
-            vmin=vmin, vmax=vmax,
+            vmin=vmin, 
+            vmax=vmax,
             xticklabels=similarity_matrix.columns,
             yticklabels=similarity_matrix.index.values,
             figsize=(x,y))
         plot.ax_heatmap.set_xlabel(x_name)
         plot.ax_heatmap.set_ylabel(y_name)
         plot.savefig(out, bbox_inches='tight', dpi=dpi)
+
     except ValueError as e:
-        print("Skipped ploting of Heatmap.")
+        print("Skipped plotting of Heatmap.")
         print("Error: " + str(e))
+
+
+#--------------------------------------------------------------------------------------------------------#
+def create_consensus_per_cluster(clusters, motif_list):
+    """Assigns a consensus motif in pwm format for each cluster.
+
+    Parameter:
+    ----------
+    clusters : dict
+        Dictionary containing lists of gimmemotif objects
+    motif_list : list 
+        list of gimmemotif objects
+
+    Returns:
+    --------
+    cluster_consensus_motifs : dict
+        Dictionary containing cluster names as keys and gimmemotif onjects values.
+    """
+ 
+    cluster_consensus_motifs = dict()
+
+    for cluster, cluster_motifs_list in clusters.items():
+
+        # Get list of gimmemotif objects per cluster
+        gimmemotifs_list = list()
+        for m in motif_list:
+            if m.id in cluster_motifs_list:
+                gimmemotifs_list.append(m)
+
+        consensus_motif = create_consensus_from_list(gimmemotifs_list)
+        consensus_motif.id = cluster + ":" + consensus_motif.id
+        cluster_consensus_motifs[cluster] = consensus_motif
+
+    return cluster_consensus_motifs
+
+
+#--------------------------------------------------------------------------------------------------------#
+def create_consensus_from_list(motif_list):
+    """Creats a consensus motif from list of motifs
+
+    Parameter:
+    ----------
+    motif_list : list
+        list of gimmemotif objects
+    
+    Returns:
+        gimmemotif object
+    """
+
+    # Make copy of motif_list before going through
+    motif_list_cp = copy.deepcopy(motif_list)
+
+    if len(motif_list) > 1:
+        consensus_found = False
+        mc = MotifComparer()
+
+        #Initialize score_dict
+        score_dict = mc.get_all_scores(motif_list_cp, motif_list_cp, match = "total", metric = "pcc", combine = "mean")
+
+        while not consensus_found:
+
+            #Which motifs to merge?
+            best_similarity_motifs = sorted(find_best_pair(motif_list_cp, score_dict))   #indices of most similar motifs in cluster_motifs
+
+            #Merge
+            new_motif = merge_motifs(motif_list_cp[best_similarity_motifs[0]], motif_list_cp[best_similarity_motifs[1]]) 
+
+            del(motif_list_cp[best_similarity_motifs[1]])
+            motif_list_cp[best_similarity_motifs[0]] = new_motif
+
+            if len(motif_list_cp) == 1:    #done merging
+                consensus_found = True
+
+            else:   #Update score_dict
+
+                #add the comparison of the new motif to the score_dict
+                score_dict[new_motif.id] = score_dict.get(new_motif.id, {})
+
+                for m in motif_list_cp:
+                    score_dict[new_motif.id][m.id] = mc.compare_motifs(new_motif, m, metric= "pcc")
+                    score_dict[m.id][new_motif.id] = mc.compare_motifs(m, new_motif, metric = "pcc")
+
+    return(motif_list_cp[0])
+
+
+#--------------------------------------------------------------------------------------------------------#
+def merge_motifs(motif_1, motif_2):
+    """Creates the consensus motif from two provided motifs, using the pos and orientation calculated by gimmemotifs get_all_scores()
+    Parameter:
+    ----------
+    motif_1 : Object of class Motif
+        First gimmemotif object to create the consensus.
+    motif_2 : Object of class Motif
+        Second gimmemotif object to create consensus.
+
+    Returns:
+    --------
+    consensus : Object of class Motif
+        Consensus of both motifs with id composed of ids of motifs it was created.
+    """
+
+    mc = MotifComparer()
+    _, pos, orientation = mc.compare_motifs(motif_1, motif_2, metric= "pcc")
+    consensus = motif_1.average_motifs(motif_2, pos = pos, orientation = orientation)
+    consensus.id = motif_1.id + "+" + motif_2.id
+    return consensus
+
+
+#--------------------------------------------------------------------------------------------------------#
+def find_best_pair(cluster_motifs, score_dict):
+    """Finds the best pair of motifs based on the best similarity between them im comparison to other motifs in the list.
+    Parameter:
+    ----------
+    clusters_motifs : list
+        List of motifs assigned to the current cluster.
+    score_dict : dict
+        Dictionary conatining list of [similarity_score, pos, strand] as values and motif names as keys.
+
+    Returns:
+    --------
+    best_similarity_motifs : list of two elements
+        List of the best pair of motifs found based on the similarity.
+    """
+
+    best_similarity = 0
+    for i, m in enumerate(cluster_motifs):
+        for j, n in enumerate(cluster_motifs):
+            if m.id is not n.id: 
+                this_similarity = score_dict[m.id][n.id][0]
+                if this_similarity > best_similarity:
+                    best_similarity = this_similarity
+                    best_similarity_motifs = [i, j] #index of the most similar motifs in cluster_motifs
+
+    return best_similarity_motifs
 
 
 #--------------------------------------------------------------------------------------------------------#
@@ -675,7 +785,8 @@ def run_motifclust(args):
     ###### Check input arguments ######
     check_required(args, ["motifs"])           #Check input arguments
     check_files([args.motifs])   #Check if files exist
-    make_directory(args.outdir)
+    out_cons_img = os.path.join(args.outdir, "consensus_motifs_img")
+    make_directory(out_cons_img)
     out_prefix = os.path.join(args.outdir, args.prefix)
 
     ###### Create logger and write argument overview ######
@@ -692,8 +803,12 @@ def run_motifclust(args):
 
     logger.info("Handling input file(s)")
 
-    motif_list = [] #list containing gimmemotifs-motif-objects
-    motif_dict = {} #dictionary containing separate motif lists per file
+    motif_list = list() #list containing gimmemotifs-motif-objects
+    motif_dict = dict() #dictionary containing separate motif lists per file
+
+    if sys.version_info<(3,7,0): # workaround for deepcopy with python version < 3.5
+        copy._deepcopy_dispatch[type(re.compile(''))] = lambda r, _: r
+
     for f in args.motifs:
         logger.debug("Reading {0}".format(f))
 
@@ -702,13 +817,11 @@ def run_motifclust(args):
 
         #Read motifs to internal structure
         sub_motif_list = get_motifs(f, motif_format)
-        m_names = list(m.id for m in sub_motif_list)
         logger.stats("- Read {0} motifs from {1} (format: {2})".format(len(sub_motif_list), f, motif_format))
 
-        motif_list.extend(sub_motif_list)
         motif_dict[f] = sub_motif_list
-
-
+        motif_list.extend(sub_motif_list)
+    
     #---------------------------------------- Generating similarity matrix ----------------------------------#
     
     logger.info("Generating similarity matrix")
@@ -737,84 +850,45 @@ def run_motifclust(args):
     write_motif_stats(motifs_stats, full_motifs_out)
 
     # Get motif stats only for dissimilar motifs
-    dissimilar_motifs_out = out_prefix + "_dissimilar_motifs.txt"
-    dissimilar_motifs = get_dissimilar_motifs(similarity_matrix, args.threshold)
-    stats_dissimilar_motifs = dict((k, motifs_stats[k]) for k in dissimilar_motifs)
-    write_motif_stats(stats_dissimilar_motifs, dissimilar_motifs_out)
+    #dissimilar_motifs_out = out_prefix + "_dissimilar_motifs.txt"
+    #dissimilar_motifs = get_dissimilar_motifs(similarity_matrix, args.threshold)
+    #stats_dissimilar_motifs = dict((k, motifs_stats[k]) for k in dissimilar_motifs)
+    #write_motif_stats(stats_dissimilar_motifs, dissimilar_motifs_out)
     
 
     #---------------------------------------- Motif clustering ----------------------------------------------#
     
     logger.info("Clustering motifs")
 
-    linkage, clusters = cluster_motifs(similarity_matrix, args.threshold, args.clust_method)
+    clust_linkage, clusters = cluster_motifs(similarity_matrix, args.threshold, args.clust_method)
     logger.stats("- Identified {0} clusters".format(len(clusters)))
 
-    # Scaling for plots
-    y_len = len(similarity_matrix.index.values)
-    x_len = len(similarity_matrix.columns)
-
-    y = args.height if args.height else y_len*scaling(y_len)
-    x = args.width if args.width else x_len*scaling(x_len)
-
     cluster_f = out_prefix + "_" + "clusters.yml"
-    dendrogram_f = out_prefix + "_" + "dendrogram"
+    logger.info("- Writing clusters to {0}".format(cluster_f))
+    write_yaml(clusters, cluster_f)     #Write out clusters
 
-    #Write out clusters and plot dendrogram
-    write_yaml(clusters, cluster_f)
-    plot_dendrogram(similarity_matrix.columns, linkage, 12, dendrogram_f, dendrogram_f, args.threshold, x, args.dpi, args.type)
+    # Scaling for plots
+    logger.info("Plotting clustering dendrogram")
+
+    #Plot dendrogram
+    dendrogram_f = out_prefix + "_" + "dendrogram." + args.type     #plot format pdf/png
+    plot_dendrogram(similarity_matrix.columns, clust_linkage, 12, dendrogram_f, dendrogram_f, args.threshold, args.dpi)
     
-    #IDEA: Plot dendrogram for each input file individually?
-    """
-    if args.merge or not args.motifs2:
-        if not args.ncc or not args.nrc:
-            if args.motifs2:
-                filename_1 = os.path.splitext(os.path.basename(args.motifs1))[0] + "_" + os.path.splitext(os.path.basename(args.motifs2))[0]
-                f_name_2 = filename_1
-
-    if args.motifs2 and not args.merge:
-        filename_2 = os.path.splitext(os.path.basename(args.motifs2))[0]
-        f_name_2 = filename_2
-        if not args.nrc: # if false skip writing yaml file and dendrogram for row clustering
-            write_yaml(row_cluster, out_prefix + "_" + filename_2)
-            plot_dendrogram(similarity_matrix.index.values, row_linkage, 12, args.outdir, args.prefix + "_" + filename_2, args.threshold, y, args.dpi, args.type)
-        if not args.ncc:
-            write_yaml(col_cluster, out_prefix + "_" + filename_1)
-            plot_dendrogram(similarity_matrix.columns, col_linkage, 12, args.outdir, args.prefix + "_" + filename_1, args.threshold, y, args.dpi, args.type)        
-    """
 
     #---------------------------------------- Consensus motif -----------------------------------------------#
 
     logger.info("Building consensus motifs for each cluster")
 
-    cons = generate_consensus_motifs(motif_list, clusters, score_dict)
+    cluster_consensus_motifs = create_consensus_per_cluster(clusters, motif_list)
 
-    # Image output path
-    out_cons_img = os.path.join(args.outdir, "consensus_motifs_img")
-    make_directory(out_cons_img)
-    consensus_motif_out_wrapper(cons, out_prefix, out_cons_img, args.cons_format, args.prefix, args.type)
+    #Round all counts
+    for key in cluster_consensus_motifs:
+    	cluster_consensus_motifs[key].pwm = [[round(f, 5) for f in l] for l in cluster_consensus_motifs[key].pwm]
+
+    #Write out consensus motifs to file/images
+    consensus_motif_out_wrapper(cluster_consensus_motifs, out_prefix, out_cons_img, args.cons_format, args.type)
 
     #IDEA: Cluster and build consensus motif for each input file individually?
-    """
-    # Generate output depending on set parameters
-    if args.merge or not args.motifs2: # col and row are identical
-        if not args.ncc or not args.nrc:
-            # Generate consensus motifs for each column cluster 
-            cons = generate_consensus_motifs(motif_list, col_cluster, score_dict)
-            # Save output
-            consesus_motif_out_wrapper(cons, out_prefix, out_cons_img, args.cons_format, args.name, args.type)
-    else: # col and row differ
-        if not args.ncc:
-            # Generate consensus motifs for each column cluster 
-            col_cons = generate_consensus_motifs(motif_list, col_cluster, score_dict)
-            # Save output
-            consesus_motif_out_wrapper(col_cons, out_prefix, out_cons_img, args.cons_format, args.name, args.type, os.path.splitext(os.path.basename(args.motifs1))[0])
-        if not args.nrc:
-            # Generate consensus motifs for each row cluster 
-            row_cons = generate_consensus_motifs(motif_list, row_cluster, score_dict)
-            # Save output
-            consesus_motif_out_wrapper(row_cons, out_prefix, out_cons_img, args.cons_format, args.name, args.type, os.path.splitext(os.path.basename(args.motifs2))[0])
-    """
 
     #---------------------------------------- Plot heatmap --------------------------------------------------#
 
@@ -823,31 +897,32 @@ def run_motifclust(args):
     args.ncc = False
     args.zscore = "None"
 
-    pdf_out = out_prefix + "_heatmap_all." + args.type
+    heatmap_out = out_prefix + "_heatmap_all." + args.type
     x_label = "All motifs"
     y_label = "All motifs"
-    plot_heatmap(similarity_matrix, pdf_out, x, y, linkage, linkage, args.dpi, x_label, y_label, args.color, args.ncc, args.nrc, args.zscore)
+
+    plot_heatmap(similarity_matrix, heatmap_out, clust_linkage, clust_linkage, args.dpi, x_label, y_label, args.color, args.ncc, args.nrc, args.zscore)
     
     # Plot heatmaps for each combination of motif files
     comparisons = itertools.combinations(args.motifs, 2)
     for i, (motif_file_1, motif_file_2) in enumerate(comparisons):
         
-        pdf_out = out_prefix + "_heatmap" + str(i) +"." + args.type
-        logger.info("Plotting the heatmap to the file " + str(pdf_out))
+        heatmap_out = out_prefix + "_heatmap" + str(i+1) +"." + args.type
+        logger.info("Plotting the heatmap between {0} and {1} to the file {2}".format(motif_file_1, motif_file_2, heatmap_out))
 
         x_label, y_label = motif_file_1, motif_file_2
 
         #Create subset of matrices for row/col clustering
-        motif_names_1 = [motif.name for motif in motif_dict[motif_file_1]]
-        motif_names_2 = [motif.name for motif in motif_dict[motif_file_2]]
+        motif_names_1 = [motif.id for motif in motif_dict[motif_file_1]]
+        motif_names_2 = [motif.id for motif in motif_dict[motif_file_2]]
 
         m1_matrix, m2_matrix, similarity_matrix_sub = subset_matrix(similarity_matrix,  motif_names_1, motif_names_2)
 
-        col_linkage = linkage(ssd.squareform(m1_matrix))
-        row_linkage = linkage(ssd.squareform(m2_matrix))
+        col_clust_linkage = linkage(ssd.squareform(m1_matrix))
+        row_clust_linkage = linkage(ssd.squareform(m2_matrix))
 
         #Plot similarity heatmap between file1 and file2
-        plot_heatmap(similarity_matrix_sub, pdf_out, x, y, col_linkage, row_linkage, args.dpi, x_label, y_label, args.color, args.ncc, args.nrc, args.zscore)
+        plot_heatmap(similarity_matrix_sub, heatmap_out, col_clust_linkage, row_clust_linkage, args.dpi, x_label, y_label, args.color, args.ncc, args.nrc, args.zscore)
     
     # ClusterMotifs finished
     logger.end()
